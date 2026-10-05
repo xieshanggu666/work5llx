@@ -19,8 +19,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import (EvacuationRecord, FloodZone, ForecastRun, ForecastSeries,
-                        RainStation, RainfallEvent, Reservoir, RiverNode, RiverReach,
-                        SubBasin, WaterStation, WarningRecord)
+                        OperationPlan, RainStation, RainfallEvent, Reservoir,
+                        RiverNode, RiverReach, SubBasin, WaterStation, WarningRecord)
 from app.services.hydrology import (BasinTopology, compute_sub_basin, muskingum)
 from app.services.reservoir import run_scenarios
 
@@ -85,7 +85,8 @@ def _upsert_warning(db: Session, run_id: int, data: dict) -> None:
     """按 (run_id, target_type, target_id, kind) 幂等写入预警。
 
     已存在时只刷新派生字段（等级/峰值/阈值/文案），保留人工处置状态
-    (status) 与首次触发时间 (created_at)，重跑不会重置已销警记录。
+    (status)、处置单挂接 (disposal_id) 与首次触发时间 (created_at)，
+    重跑不会重置已销警或已挂接处置单的记录。
     """
     rec = (db.query(WarningRecord)
            .filter(WarningRecord.run_id == run_id,
@@ -117,6 +118,54 @@ def _upsert_evacuation(db: Session, run_id: int, data: dict) -> None:
         rec.zone_name = data["zone_name"]
         rec.triggered_by = data["triggered_by"]
         rec.people = data["people"]
+
+
+def save_operation_plan(db: Session, run_id: int, mode: str, scenarios: dict,
+                        res_list: list, res_inflow: dict, res_outflow: dict,
+                        res_level: dict, res_storage: dict) -> OperationPlan:
+    """按 run_id 幂等归档本次运行所选工况的联合调度方案。
+
+    同一次预报运行重复推演只更新同一份方案（先删后插），方案中的各库
+    终态水位/库容是处置单审核通过后回写水库工况的依据。
+    """
+    db.query(OperationPlan).filter(OperationPlan.run_id == run_id).delete(
+        synchronize_session=False)
+    chosen = scenarios[mode]
+    natural = scenarios["natural"]
+    peak_flow = chosen["objective"]
+    nat_peak = natural["objective"]
+    peak_ratio = round((nat_peak - peak_flow) / nat_peak * 100, 1) if nat_peak else 0.0
+
+    storage_gain = 0.0
+    outcome = {}
+    gate_schedule = {}
+    for r in res_list:
+        stor = res_storage[r.id]
+        gain = (stor[-1] - r.storage_at(r.current_level or r.normal_level)) if stor else 0.0
+        storage_gain += gain
+        gate = chosen["gate"].get(r.id, [])
+        gate_schedule[str(r.id)] = {str(t): round(g, 3) for t, g in enumerate(gate)}
+        lvl = res_level[r.id]
+        out = res_outflow[r.id]
+        outcome[str(r.id)] = {
+            "name": r.name,
+            "peak_level": round(max(lvl), 2) if lvl else 0.0,
+            "final_level": round(lvl[-1], 2) if lvl else 0.0,
+            "final_storage": round(stor[-1], 1) if stor else 0.0,
+            "peak_outflow": round(max(out), 1) if out else 0.0,
+            "storage_gain": round(gain, 1),
+        }
+
+    mode_name = {"natural": "天然过流", "rule": "规则调度",
+                 "optimized": "联合优化调度"}.get(mode, mode)
+    plan = OperationPlan(
+        run_id=run_id, name=f"{mode_name}方案（运行#{run_id}）",
+        objective=f"下游控制断面峰值压降至 {peak_flow:.0f} m³/s，削峰率 {peak_ratio}%",
+        peak_flow=round(peak_flow, 1), peak_ratio=peak_ratio,
+        storage_gain=round(storage_gain, 1),
+        gate_schedule=gate_schedule, reservoir_outcome=outcome)
+    db.add(plan)
+    return plan
 
 
 def _rainfall_at(db: Session, event: RainfallEvent, station: RainStation, total_steps: int) -> List[float]:
@@ -163,11 +212,13 @@ def _warning_level_for(station: WaterStation, flow: float, level: float) -> str:
 
 
 def run_forecast(db: Session, event: RainfallEvent, reservoir_rule: str = "optimized",
-                 persist: bool = True) -> dict:
+                 persist: bool = True, write_ledgers: bool = True) -> dict:
     """执行一次完整洪水预报。
 
     persist=True 时按 (event_id, mode) 幂等落库：重复执行 / 并发触发 /
     异常重试都复用同一次 ForecastRun，预警与转移台账不会重复新增。
+    write_ledgers=False 时只重建过程线与调度方案（处置单为历史运行补齐
+    审核依据用），不触碰预警/转移台账及其人工处置状态。
     """
     dt = DT_H
     subs = db.query(SubBasin).all()
@@ -223,9 +274,11 @@ def run_forecast(db: Session, event: RainfallEvent, reservoir_rule: str = "optim
             # 到达下游水库时，其调度出流替换该节点流量后继续传播（级联）。
             res_outflow: Dict[int, List[float]] = {}
             res_level: Dict[int, List[float]] = {}
+            res_storage: Dict[int, List[float]] = {}
             for r in res_list:
                 res_outflow[r.id] = chosen["sim"][r.id]["outflow"]
                 res_level[r.id] = chosen["sim"][r.id]["level"]
+                res_storage[r.id] = chosen["sim"][r.id]["storage"]
 
             node_flow = {n.id: [0.0] * total_steps for n in nodes}  # 重置，重新以出流为准传播
             # 先注入各子流域出流（与调度无关的部分，重新叠加）
@@ -330,15 +383,21 @@ def run_forecast(db: Session, event: RainfallEvent, reservoir_rule: str = "optim
             for r in res_list:
                 series_rows.append((r.node_id, "inflow", r.name, res_inflow[r.id]))
                 series_rows.append((r.node_id, "resout", r.name, res_outflow[r.id]))
+                series_rows.append((r.node_id, "reslevel", r.name, res_level[r.id]))
+                series_rows.append((r.node_id, "resstorage", r.name, res_storage[r.id]))
 
             if persist:
                 # 派生数据 + 处置记录在同一事务提交：要么全部落库，要么整体回滚，
                 # 异常重试时按幂等键upsert即可自动补齐缺口，不会产生重复台账。
                 _replace_series(db, run.id, series_rows)
-                for w in pending_warnings:
-                    _upsert_warning(db, run.id, w)
-                for ev in pending_evacuations:
-                    _upsert_evacuation(db, run.id, ev)
+                # 调度方案按 run_id 幂等归档，供处置单审核与回写
+                save_operation_plan(db, run.id, mode, scenarios, res_list,
+                                    res_inflow, res_outflow, res_level, res_storage)
+                if write_ledgers:
+                    for w in pending_warnings:
+                        _upsert_warning(db, run.id, w)
+                    for ev in pending_evacuations:
+                        _upsert_evacuation(db, run.id, ev)
                 run.status = "done"
                 db.commit()
         except Exception:
@@ -363,7 +422,8 @@ def run_forecast(db: Session, event: RainfallEvent, reservoir_rule: str = "optim
                           "warning": station_warn[st.id]} for st in stations],
             "reservoirs": [{"id": r.id, "name": r.name, "node_id": r.node_id,
                             "inflow": res_inflow[r.id], "outflow": res_outflow[r.id],
-                            "level": res_level[r.id],
+                            "level": res_level[r.id], "storage": res_storage[r.id],
+                            "gate": chosen["gate"].get(r.id, [0.0] * total_steps),
                             "crest_level": r.crest_level, "flood_level": r.flood_level,
                             "gate_max": r.gate_max}
                            for r in res_list],

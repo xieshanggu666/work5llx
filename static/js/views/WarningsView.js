@@ -85,15 +85,20 @@ window.WarningsView = {
           <div class="panel-head">预警记录 <span class="tag">{{ warnings.length }} 条</span></div>
           <div class="panel-body nopad" style="max-height:480px;overflow-y:auto">
             <table class="grid">
-              <thead><tr><th>等级</th><th>目标</th><th>触发值</th><th>时间</th></tr></thead>
+              <thead><tr><th>等级</th><th>目标</th><th>触发值</th><th>处置单</th><th>时间</th></tr></thead>
               <tbody>
                 <tr v-for="w in warnings" :key="w.id">
                   <td><span class="badge" :class="fmt.lvBadge(w.level)">{{ fmt.lvName(w.level) }}</span></td>
                   <td>{{ w.target_name }}</td>
                   <td class="num mono">{{ fmt.num(w.value,1) }} / {{ fmt.num(w.threshold,1) }}</td>
+                  <td>
+                    <span v-if="w.disposal_id" class="badge blue" style="cursor:pointer"
+                          @click="$root.view='disposal'">#{{ w.disposal_id }}</span>
+                    <span v-else class="badge gray">历史</span>
+                  </td>
                   <td style="font-size:11.5px;color:#7d95b4">{{ fmt.time(w.created_at) }}</td>
                 </tr>
-                <tr v-if="!warnings.length"><td colspan="4" style="text-align:center;color:#7d95b4;padding:26px">暂无预警记录，执行洪水预报后自动生成</td></tr>
+                <tr v-if="!warnings.length"><td colspan="5" style="text-align:center;color:#7d95b4;padding:26px">暂无预警记录，执行洪水预报后自动生成</td></tr>
               </tbody>
             </table>
           </div>
@@ -105,16 +110,21 @@ window.WarningsView = {
           <div class="panel-head">风险区转移台账 <span class="tag">{{ evacuations.length }} 次</span></div>
           <div class="panel-body nopad">
             <table class="grid">
-              <thead><tr><th>风险区</th><th>触发方式</th><th>人数</th><th>状态</th><th>时间</th></tr></thead>
+              <thead><tr><th>风险区</th><th>触发方式</th><th>人数</th><th>状态</th><th>处置单</th><th>时间</th></tr></thead>
               <tbody>
                 <tr v-for="e in evacuations" :key="e.id">
                   <td>{{ e.zone_name }}</td>
                   <td style="font-size:12px">{{ e.triggered_by }}</td>
                   <td class="num">{{ e.people }} 人</td>
                   <td><span class="badge" :class="evacColor(e.status)">{{ evacName(e.status) }}</span></td>
+                  <td>
+                    <span v-if="e.disposal_id" class="badge blue" style="cursor:pointer"
+                          @click="$root.view='disposal'">#{{ e.disposal_id }}</span>
+                    <span v-else class="badge gray">历史</span>
+                  </td>
                   <td style="font-size:11.5px;color:#7d95b4">{{ fmt.time(e.created_at) }}</td>
                 </tr>
-                <tr v-if="!evacuations.length"><td colspan="5" style="text-align:center;color:#7d95b4;padding:26px">无转移记录</td></tr>
+                <tr v-if="!evacuations.length"><td colspan="6" style="text-align:center;color:#7d95b4;padding:26px">无转移记录</td></tr>
               </tbody>
             </table>
           </div>

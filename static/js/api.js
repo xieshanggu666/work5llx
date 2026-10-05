@@ -5,10 +5,15 @@ const API = {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   },
-  async post(path) {
-    const r = await fetch(path, { method: "POST" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  async post(path, body) {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    return data;
   },
   overview: () => API.get("/api/overview"),
   map: () => API.get("/api/map"),
@@ -20,6 +25,13 @@ const API = {
   forecast: (eid, mode) => API.post(`/api/forecast/${eid}/${mode}`),
   forecastRuns: () => API.get("/api/forecast/runs"),
   forecastSeries: (runId) => API.get(`/api/forecast/series/${runId}`),
+  // 联合防汛处置协同
+  disposals: () => API.get("/api/disposals"),
+  disposal: (id) => API.get(`/api/disposals/${id}`),
+  initiateDisposal: (runId, body) => API.post(`/api/disposals/from-run/${runId}`, body),
+  reviewDisposal: (id, body) => API.post(`/api/disposals/${id}/review`, body),
+  executeDisposal: (id, body) => API.post(`/api/disposals/${id}/execute`, body),
+  completeDisposal: (id, body) => API.post(`/api/disposals/${id}/complete`, body),
 };
 
 /* 全局运行状态：跨视图共享最近一次预报结果 / 运行记录 */

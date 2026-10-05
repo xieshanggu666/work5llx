@@ -1,13 +1,41 @@
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models import (EvacuationRecord, FloodZone, ForecastRun, ForecastSeries,
-                        RainStation, RainfallEvent, Reservoir, RiverNode,
-                        RiverReach, SubBasin, WaterStation, WarningRecord)
+from app.models import (DisposalOrder, EvacuationRecord, FloodZone, ForecastRun,
+                        ForecastSeries, RainStation, RainfallEvent, Reservoir,
+                        RiverNode, RiverReach, SubBasin, WaterStation, WarningRecord)
+from app.services import disposal as disposal_svc
 from app.services.forecast import run_forecast
 
 router = APIRouter(prefix="/api")
+
+
+# ---------------- 联合防汛处置协同请求体 ----------------
+class InitiateBody(BaseModel):
+    operator: str = ""          # 操作人姓名
+    role: str = "dispatcher"    # dispatcher 调度员
+    title: str = ""
+    remark: str = ""
+
+
+class ReviewBody(BaseModel):
+    operator: str = ""
+    role: str = "duty"          # duty 预警值守
+    opinion: str = ""           # 审核意见
+
+
+class ExecuteBody(BaseModel):
+    operator: str = ""
+    role: str = "transfer_lead"  # transfer_lead 转移负责人
+    note: str = ""
+
+
+class CompleteBody(BaseModel):
+    operator: str = ""
+    role: str = "transfer_lead"
+    summary: str = ""
 
 
 @router.get("/overview")
@@ -45,6 +73,7 @@ def basin_map(db: Session = Depends(get_db)):
     reservoirs = [{"id": r.id, "name": r.name, "node_id": r.node_id,
                    "normal_level": r.normal_level, "flood_level": r.flood_level,
                    "crest_level": r.crest_level, "current_level": r.current_level,
+                   "current_storage": r.current_storage,
                    "gate_max": r.gate_max, "x": r.x, "y": r.y}
                   for r in db.query(Reservoir).all()]
     stations = [{"id": s.id, "name": s.name, "node_id": s.node_id, "x": s.x, "y": s.y,
@@ -88,7 +117,8 @@ def reservoirs(db: Session = Depends(get_db)):
 
 @router.get("/warnings")
 def warnings(db: Session = Depends(get_db)):
-    return [{"id": w.id, "run_id": w.run_id, "target_type": w.target_type,
+    return [{"id": w.id, "run_id": w.run_id, "disposal_id": w.disposal_id,
+             "target_type": w.target_type,
              "target_id": w.target_id,
              "target_name": w.target_name, "level": w.level, "value": w.value,
              "threshold": w.threshold, "message": w.message,
@@ -99,7 +129,8 @@ def warnings(db: Session = Depends(get_db)):
 
 @router.get("/evacuations")
 def evacuations(db: Session = Depends(get_db)):
-    return [{"id": e.id, "run_id": e.run_id, "zone_id": e.zone_id, "zone_name": e.zone_name,
+    return [{"id": e.id, "run_id": e.run_id, "disposal_id": e.disposal_id,
+             "zone_id": e.zone_id, "zone_name": e.zone_name,
              "triggered_by": e.triggered_by, "people": e.people, "status": e.status,
              "created_at": e.created_at.isoformat() if e.created_at else None}
             for e in db.query(EvacuationRecord).order_by(EvacuationRecord.id.desc()).all()]
@@ -115,9 +146,23 @@ def forecast(eid: int, mode: str, db: Session = Depends(get_db)):
 
 @router.get("/forecast/runs")
 def forecast_runs(db: Session = Depends(get_db)):
-    return [{"id": r.id, "event_id": r.event_id, "mode": r.mode, "status": r.status,
-             "created_at": r.created_at.isoformat() if r.created_at else None}
-            for r in db.query(ForecastRun).order_by(ForecastRun.id.desc()).limit(20).all()]
+    """历史预报记录，附带处置单状态（无处置单时 disposal 为 null）。"""
+    runs = (db.query(ForecastRun)
+            .order_by(ForecastRun.id.desc()).limit(20).all())
+    orders = {o.run_id: o for o in db.query(DisposalOrder).all()}
+    result = []
+    for r in runs:
+        event = db.get(RainfallEvent, r.event_id)
+        order = orders.get(r.id)
+        result.append({
+            "id": r.id, "event_id": r.event_id,
+            "event_name": event.name if event else "（情景已删除）",
+            "mode": r.mode, "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "disposal": ({"id": order.id, "status": order.status}
+                         if order else None),
+        })
+    return result
 
 
 @router.get("/forecast/series/{run_id}")
@@ -125,3 +170,39 @@ def forecast_series(run_id: int, db: Session = Depends(get_db)):
     rows = db.query(ForecastSeries).filter(ForecastSeries.run_id == run_id).all()
     return [{"id": r.id, "node_id": r.node_id, "kind": r.kind, "name": r.name,
              "values": r.values} for r in rows]
+
+
+# ---------------- 联合防汛处置协同 ----------------
+@router.get("/disposals")
+def disposal_list(db: Session = Depends(get_db)):
+    return disposal_svc.list_orders(db)
+
+
+@router.get("/disposals/{order_id}")
+def disposal_detail(order_id: int, db: Session = Depends(get_db)):
+    return disposal_svc.get_order(db, order_id)
+
+
+@router.post("/disposals/from-run/{run_id}")
+def disposal_initiate(run_id: int, body: InitiateBody, db: Session = Depends(get_db)):
+    """调度员围绕预报运行发起处置单（同一运行重复发起幂等返回已存在单据）。"""
+    return disposal_svc.initiate_order(db, run_id, body.operator, body.role,
+                                       body.title, body.remark)
+
+
+@router.post("/disposals/{order_id}/review")
+def disposal_review(order_id: int, body: ReviewBody, db: Session = Depends(get_db)):
+    """预警值守审核通过：回写水库工况、预警与转移台账。"""
+    return disposal_svc.review_order(db, order_id, body.operator, body.role, body.opinion)
+
+
+@router.post("/disposals/{order_id}/execute")
+def disposal_execute(order_id: int, body: ExecuteBody, db: Session = Depends(get_db)):
+    """转移负责人启动执行：转移台账进入转移中。"""
+    return disposal_svc.execute_order(db, order_id, body.operator, body.role, body.note)
+
+
+@router.post("/disposals/{order_id}/complete")
+def disposal_complete(order_id: int, body: CompleteBody, db: Session = Depends(get_db)):
+    """转移负责人确认完成：转移到位、预警销警，处置闭环。"""
+    return disposal_svc.complete_order(db, order_id, body.operator, body.role, body.summary)

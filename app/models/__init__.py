@@ -179,8 +179,11 @@ class ForecastSeries(Base):
 
 
 class OperationPlan(Base):
-    """水库群联合调度方案"""
+    """水库群联合调度方案（按 run_id 幂等：一次预报运行至多一份方案）"""
     __tablename__ = "operation_plans"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_operation_plan_run"),
+    )
 
     id = Column(Integer, primary_key=True)
     run_id = Column(Integer, nullable=False)
@@ -190,6 +193,40 @@ class OperationPlan(Base):
     peak_ratio = Column(Float, default=0.0)          # 削峰率 %
     storage_gain = Column(Float, default=0.0)        # 蓄水增量 万m³
     gate_schedule = Column(JSON, default=dict)       # {reservoir_id: {hour: 泄流系数}}
+    reservoir_outcome = Column(JSON, default=dict)   # {reservoir_id: {name,peak_level,final_level,final_storage,peak_outflow}}
+
+
+class DisposalOrder(Base):
+    """联合防汛处置协同单：调度员发起 → 预警值守审核 → 转移负责人执行 → 完成闭环。
+
+    一次预报运行至多发起一单（run_id 唯一）。审核通过后，方案快照
+    (plan_snapshot) 回写水库工况、预警与转移台账；历史预报运行缺少
+    方案/过程线时，发起环节自动补算补齐，兼容历史运行记录。
+    状态机：initiated（待审核）→ reviewing 通过 → approved（待执行）
+    → executing → executed（执行中）→ completing → completed（已闭环）。
+    """
+    __tablename__ = "disposal_orders"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_disposal_order_run"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, nullable=False)
+    title = Column(String(128), nullable=False)
+    status = Column(String(16), default="initiated")  # initiated/approved/executed/completed
+    plan_snapshot = Column(JSON, default=dict)        # 审核归档的调度方案快照
+    remark = Column(String(200), default="")
+
+    initiated_by = Column(String(64), default="")     # 发起：调度员
+    reviewed_by = Column(String(64), default="")      # 审核：预警值守
+    executed_by = Column(String(64), default="")      # 执行：转移负责人
+    completed_by = Column(String(64), default="")     # 完成：转移负责人
+
+    initiated_at = Column(DateTime, default=datetime.now)
+    reviewed_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.now)
 
 
 class WarningRecord(Base):
@@ -202,6 +239,7 @@ class WarningRecord(Base):
 
     id = Column(Integer, primary_key=True)
     run_id = Column(Integer, nullable=True)               # 关联预报运行；历史记录为 NULL
+    disposal_id = Column(Integer, nullable=True)          # 处置单审核回写关联；历史记录为 NULL
     target_type = Column(String(24), default="station")   # station/reservoir/zone
     target_id = Column(Integer, default=0)
     target_name = Column(String(64), default="")
@@ -240,6 +278,7 @@ class EvacuationRecord(Base):
 
     id = Column(Integer, primary_key=True)
     run_id = Column(Integer, nullable=True)           # 关联预报运行；历史记录为 NULL
+    disposal_id = Column(Integer, nullable=True)      # 处置单审核回写关联；历史记录为 NULL
     zone_id = Column(Integer, nullable=False)
     zone_name = Column(String(64), default="")
     triggered_by = Column(String(64), default="")
