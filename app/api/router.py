@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models import (EvacuationRecord, FloodZone, ForecastRun, ForecastSeries,
-                        RainStation, RainfallEvent, Reservoir, RiverNode,
-                        RiverReach, SubBasin, WaterStation, WarningRecord)
+                        RainStation, RainfallEvent, Reservoir, ResponseTask,
+                        RiverNode, RiverReach, SubBasin, WaterStation, WarningRecord)
+from app.schemas import (ResponseComplete, ResponseExecute, ResponseInitiate,
+                         ResponseReview)
 from app.services.forecast import run_forecast
+from app.services.response import (ResponseStateError, complete_response,
+                                   execute_response, initiate_response,
+                                   review_response)
 
 router = APIRouter(prefix="/api")
 
@@ -125,3 +130,67 @@ def forecast_series(run_id: int, db: Session = Depends(get_db)):
     rows = db.query(ForecastSeries).filter(ForecastSeries.run_id == run_id).all()
     return [{"id": r.id, "node_id": r.node_id, "kind": r.kind, "name": r.name,
              "values": r.values} for r in rows]
+
+
+# ---------- 联合防汛处置协同（发起→审核→执行→完成 四态闭环） ----------
+
+def _iso(dt):
+    return dt.isoformat() if dt else None
+
+
+def _task_dict(db: Session, t: ResponseTask) -> dict:
+    run = db.get(ForecastRun, t.run_id)
+    event = db.get(RainfallEvent, run.event_id) if run else None
+    return {
+        "id": t.id, "run_id": t.run_id, "title": t.title, "status": t.status,
+        "plan": t.plan or {}, "writeback": t.writeback or {},
+        "dispatcher": t.dispatcher, "duty_officer": t.duty_officer,
+        "evac_lead": t.evac_lead, "review_note": t.review_note,
+        "created_at": _iso(t.created_at), "reviewed_at": _iso(t.reviewed_at),
+        "executed_at": _iso(t.executed_at), "completed_at": _iso(t.completed_at),
+        "run": {"id": run.id, "mode": run.mode, "status": run.status,
+                "event_id": run.event_id,
+                "event_name": event.name if event else ""} if run else None,
+    }
+
+
+@router.get("/response-tasks")
+def response_tasks(db: Session = Depends(get_db)):
+    return [_task_dict(db, t)
+            for t in db.query(ResponseTask).order_by(ResponseTask.id.desc()).all()]
+
+
+@router.post("/response-tasks")
+def response_initiate(body: ResponseInitiate, db: Session = Depends(get_db)):
+    try:
+        task = initiate_response(db, body.run_id, body.dispatcher, body.title)
+    except ResponseStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _task_dict(db, task)
+
+
+@router.post("/response-tasks/{tid}/review")
+def response_review(tid: int, body: ResponseReview, db: Session = Depends(get_db)):
+    try:
+        task = review_response(db, tid, body.duty_officer, body.approve, body.note)
+    except ResponseStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _task_dict(db, task)
+
+
+@router.post("/response-tasks/{tid}/execute")
+def response_execute(tid: int, body: ResponseExecute, db: Session = Depends(get_db)):
+    try:
+        task = execute_response(db, tid, body.evac_lead)
+    except ResponseStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _task_dict(db, task)
+
+
+@router.post("/response-tasks/{tid}/complete")
+def response_complete(tid: int, body: ResponseComplete, db: Session = Depends(get_db)):
+    try:
+        task = complete_response(db, tid, body.actor)
+    except ResponseStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _task_dict(db, task)

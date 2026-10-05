@@ -330,6 +330,9 @@ def run_forecast(db: Session, event: RainfallEvent, reservoir_rule: str = "optim
             for r in res_list:
                 series_rows.append((r.node_id, "inflow", r.name, res_inflow[r.id]))
                 series_rows.append((r.node_id, "resout", r.name, res_outflow[r.id]))
+                # 库水位过程（处置协同的方案快照与工况回写以此为据；历史运行无此序列，
+                # 发起协同时按水量平衡推算末态，保持兼容）
+                series_rows.append((r.node_id, "reslevel", r.name, res_level[r.id]))
 
             if persist:
                 # 派生数据 + 处置记录在同一事务提交：要么全部落库，要么整体回滚，

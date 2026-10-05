@@ -5,9 +5,18 @@ const API = {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
   },
-  async post(path) {
-    const r = await fetch(path, { method: "POST" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  async post(path, body) {
+    const opt = { method: "POST" };
+    if (body !== undefined) {
+      opt.headers = { "Content-Type": "application/json" };
+      opt.body = JSON.stringify(body);
+    }
+    const r = await fetch(path, opt);
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try { const j = await r.json(); if (j && j.detail) msg = j.detail; } catch (e) { /* 保留默认 */ }
+      throw new Error(msg);
+    }
     return r.json();
   },
   overview: () => API.get("/api/overview"),
@@ -20,6 +29,15 @@ const API = {
   forecast: (eid, mode) => API.post(`/api/forecast/${eid}/${mode}`),
   forecastRuns: () => API.get("/api/forecast/runs"),
   forecastSeries: (runId) => API.get(`/api/forecast/series/${runId}`),
+  responseTasks: () => API.get("/api/response-tasks"),
+  responseInitiate: (runId, dispatcher, title) =>
+    API.post("/api/response-tasks", { run_id: runId, dispatcher, title }),
+  responseReview: (id, dutyOfficer, approve, note) =>
+    API.post(`/api/response-tasks/${id}/review`, { duty_officer: dutyOfficer, approve, note }),
+  responseExecute: (id, evacLead) =>
+    API.post(`/api/response-tasks/${id}/execute`, { evac_lead: evacLead }),
+  responseComplete: (id, actor) =>
+    API.post(`/api/response-tasks/${id}/complete`, { actor }),
 };
 
 /* 全局运行状态：跨视图共享最近一次预报结果 / 运行记录 */

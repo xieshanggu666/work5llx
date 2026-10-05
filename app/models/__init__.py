@@ -231,6 +231,34 @@ class FloodZone(Base):
     y = Column(Float, default=0)
 
 
+class ResponseTask(Base):
+    """联合防汛处置协同单：围绕一次预报运行的 发起→审核→执行→完成 四态闭环。
+
+    调度员发起（挂接预报运行与调度方案快照）→ 预警值守审核 → 转移负责人执行
+    （审核后的方案回写水库工况与转移台账）→ 完成闭环（转移安置确认、预警销号）。
+    同一预报运行只存在一张协同单（run_id 唯一约束），重复发起幂等复用。
+    """
+    __tablename__ = "response_tasks"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_response_task_run"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(Integer, nullable=False)              # 关联预报运行（一次运行一张协同单）
+    title = Column(String(128), default="")
+    plan = Column(JSON, default=dict)                     # 审核后待回写的调度方案快照
+    status = Column(String(24), default="initiated")      # initiated/approved/executed/completed
+    dispatcher = Column(String(64), default="")           # 调度员（发起）
+    duty_officer = Column(String(64), default="")         # 预警值守（审核）
+    evac_lead = Column(String(64), default="")            # 转移负责人（执行）
+    review_note = Column(String(200), default="")
+    writeback = Column(JSON, default=dict)                # 执行/完成阶段的回写结果摘要
+    created_at = Column(DateTime, default=datetime.now)
+    reviewed_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+
 class EvacuationRecord(Base):
     """转移行动记录（按 run_id+风险区 幂等关联预报运行；run_id 为 NULL 的是历史遗留记录）"""
     __tablename__ = "evacuation_records"

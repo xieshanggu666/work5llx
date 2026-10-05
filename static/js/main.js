@@ -6,6 +6,7 @@ const I = {
   forecast: '<path d="M12 3v3M5.6 5.6l2 2M3 12h3m12 0h3M16.4 16.4l2 2M8 8h6a3 3 0 1 1 0 6H6"/>',
   strat: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.14-1.4l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.4-1.4L13.8 3h-4l-.36 2.3a7 7 0 0 0-2.4 1.4l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .48.05.94.14 1.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2.4 1.4l.36 2.3h4l.36-2.3a7 7 0 0 0 2.4-1.4l2.3 1 2-3.4-2-1.5c.09-.46.14-.92.14-1.4z"/>',
   alarm: '<path d="M12 4 12 5.5"/><path d="M4 19h16"/><path d="M6 19 6.5 13M9 19v-8M12 19v-6M15 19v-8M18 19l.5-6"/>',
+  response: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/>',
 };
 
 const App = {
@@ -17,6 +18,7 @@ const App = {
         { id: "monitor", name: "实时监测", icon: I.monitor },
         { id: "forecast", name: "洪水预报", icon: I.forecast },
         { id: "dispatch", name: "联合调度", icon: I.strat },
+        { id: "response", name: "处置协同", icon: I.response },
         { id: "warnings", name: "预警转移", icon: I.alarm },
       ],
       now: "",
@@ -101,6 +103,7 @@ app.component("basinmap", window.BasinMap);
 app.component("monitor", window.MonitorView);
 app.component("forecast", window.ForecastView);
 app.component("dispatch", window.DispatchView);
+app.component("response", window.ResponseView);
 app.component("warnings", window.WarningsView);
 const vmRoot = app.mount("#app");
 window.app = vmRoot;  // 供视图访问 showLoading / showToast / hideLoading
